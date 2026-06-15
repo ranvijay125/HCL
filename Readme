@@ -1,0 +1,27 @@
+GitHub ಅನ್ನು AWS ಜೊತೆ Authenticate ಮಾಡುವ ಸರಳ ವಿಧಾನ (OIDC ಬಳಸಿ):
+
+AWS IAM ನಲ್ಲಿ GitHub OIDC Provider ಅನ್ನು ಸೇರಿಸಿ.
+Provider URL: https://token.actions.githubusercontent.com
+Audience: sts.amazonaws.com
+GitHub Actions ಬಳಸಲು ಒಂದು IAM Role ರಚಿಸಿ ಮತ್ತು ಬೇಕಾದ AWS permissions ನೀಡಿ.
+
+ಆ Role ನ Trust Policy ಯಲ್ಲಿ ಯಾವ GitHub Repository ಮತ್ತು Branch ಗೆ ಪ್ರವೇಶ ನೀಡಬೇಕು ಎಂದು ನಿರ್ಧರಿಸಿ.
+
+ಉದಾಹರಣೆ:
+
+repo:my-org/my-repo:ref:refs/heads/main
+ಅಂದರೆ my-org/my-repo ರ main branch ನಿಂದ ಮಾತ್ರ AWS Role assume ಮಾಡಬಹುದು.
+
+GitHub Actions workflow ನಲ್ಲಿ ಈ permissions ಸೇರಿಸಿ:
+
+permissions:
+  id-token: write
+  contents: read
+ನಂತರ aws-actions/configure-aws-credentials action ಬಳಸಿ AWS Role assume ಮಾಡಿ.
+Workflow ಯಶಸ್ವಿಯಾಗಿ ನಡೆದರೆ aws sts get-caller-identity ಕಮಾಂಡ್ AWS ನಿಂದ ತಾತ್ಕಾಲಿಕ (temporary) credentials ಸಿಕ್ಕಿರುವುದನ್ನು ತೋರಿಸುತ್ತದೆ.
+ಸಂಕ್ಷಿಪ್ತವಾಗಿ:
+
+GitHub → OIDC Token → AWS IAM Trust Policy → STS Temporary Credentials → AWS Access
+
+ಈ ವಿಧಾನದಲ್ಲಿ AWS Access Key ಮತ್ತು Secret Key ಅನ್ನು GitHub Secrets ನಲ್ಲಿ ಸಂಗ್ರಹಿಸುವ ಅಗತ್ಯವಿಲ್ಲ. ಆದ್ದರಿಂದ ಇದು ಹೆಚ್ಚು ಸುರಕ್ಷಿತ ಮತ್ತು AWS ಶಿಫಾರಸು ಮಾಡುವ ವಿಧಾನವಾಗಿದೆ.
+
