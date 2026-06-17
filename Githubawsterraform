@@ -1,0 +1,73 @@
+#In the Target AWS Account (IAM Trust Policy)
+#You configure an OIDC Identity Provider for GitHub in your AWS account and attach a trust policy to your deployment role.
+#It restricts access only to your repository and main branch:
+
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Federated": "arn:aws:iam::TARGET_ACCOUNT_ID:oidc-provider/token.actions.githubusercontent.com"
+      },
+      "Action": "sts:AssumeRoleWithWebIdentity",
+      "Condition": {
+        "StringEquals": {
+          "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
+        },
+        "StringLike": {
+          "token.actions.githubusercontent.com:sub": "repo:your-github-org/your-repo:ref:refs/heads/main"
+        }
+      }
+    }
+  ]
+}
+
+
+Your pipeline file becomes incredibly clean. AWS provides an official action (aws-actions/configure-aws-credentials)
+that handles the OIDC token exchange automatically.
+
+name: AWS Multi-Account Terraform Deploy
+
+on:
+  push:
+    branches:
+      - main
+      - staging
+
+# CRITICAL: This gives the workflow permission to request the OIDC token
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # Set Target Role ARN dynamically based on the branch
+      - name: Set Environment Variables
+        run: |
+          if [ "${{ github.ref_name }}" = "main" ]; then
+            echo "AWS_ROLE=arn:aws:iam::PROD_ACCOUNT_ID:role/GitHubTerraformDeployRole" >> $GITHUB_ENV
+          else
+            echo "AWS_ROLE=arn:aws:iam::DEV_ACCOUNT_ID:role/GitHubTerraformDeployRole" >> $GITHUB_ENV
+          fi
+
+      # The Magic Step: Exchange GitHub token for temporary AWS keys
+      - name: Configure AWS Credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE }}
+          aws-region: us-east-1
+
+      # Run normal Terraform commands
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform Init & Apply
+        run: |
+          terraform init
+          terraform apply -auto-approve
