@@ -1,0 +1,166 @@
+name: PPT Reports CI/CD
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to build'
+        required: true
+        default: 'main'
+      environment:
+        description: 'Target environment'
+        required: true
+        type: choice
+        options:
+          - qa
+          - dev
+          - prod
+          - pre-prod
+      build_deploy_switch:
+        description: 'CI (build only) or CD (build + deploy)'
+        required: true
+        type: choice
+        options:
+          - CI
+          - CD
+        default: CI
+      run_qualys_scan:
+        description: 'Run Qualys image vulnerability scan'
+        required: false
+        type: boolean
+        default: false
+
+env:
+  REGISTRY: matilda1/ppt
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      image_name: ${{ steps.vars.outputs.image_name }}
+      ssh_host: ${{ steps.vars.outputs.ssh_host }}
+      private_key_secret: ${{ steps.vars.outputs.private_key_secret }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch }}
+
+      - name: Compute build variables
+        id: vars
+        run: |
+          CURRENT_DATE=$(date +%m%d%y)
+          BRANCH_SANITIZED=$(echo "${{ inputs.branch }}" | tr '/' '.')
+          IMAGE_NAME="${{ inputs.environment }}-v${{ github.run_number }}-${CURRENT_DATE}-${BRANCH_SANITIZED}"
+          echo "image_name=$IMAGE_NAME" >> "$GITHUB_OUTPUT"
+
+          # Mirrors the connection() function in the old Jenkinsfile.
+          # NOTE: prod/pre-prod never set a deploy target in the original
+          # pipeline either - the deploy job below will fail fast for them.
+          case "${{ inputs.environment }}" in
+            qa)
+              echo "ssh_host=ec2-user@54.200.52.141" >> "$GITHUB_OUTPUT"
+              echo "private_key_secret=SSH_KEY_QA" >> "$GITHUB_OUTPUT"
+              ;;
+            dev)
+              echo "ssh_host=ec2-user@3.13.139.181" >> "$GITHUB_OUTPUT"
+              echo "private_key_secret=SSH_KEY_DEV" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "ssh_host=" >> "$GITHUB_OUTPUT"
+              echo "private_key_secret=" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
+      - name: Pre-build notification email
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.SMTP_SERVER }}
+          server_port: 587
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          subject: "[GitHub Actions] ${{ github.workflow }} #${{ github.run_number }} started"
+          to: ${{ secrets.NOTIFY_EMAIL }}
+          from: GitHub Actions
+          body: "Build started for environment '${{ inputs.environment }}' on branch '${{ inputs.branch }}'."
+
+      - name: SonarQube Analysis
+        continue-on-error: true
+        uses: sonarsource/sonarqube-scan-action@v4
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+        with:
+          args: >
+            -Dsonar.projectKey=Matilda-PPT-Reports
+            -Dsonar.sources=.
+
+      - name: Docker login
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build and push Docker image
+        run: |
+          docker build -t "$REGISTRY:${{ steps.vars.outputs.image_name }}" .
+          docker push "$REGISTRY:${{ steps.vars.outputs.image_name }}"
+
+      - name: Qualys image scan
+        if: ${{ inputs.run_qualys_scan }}
+        run: |
+          echo "Scanning $REGISTRY:${{ steps.vars.outputs.image_name }} with Qualys"
+          # Replace with your org's actual Qualys CLI/action invocation,
+          # e.g. the Qualys Container Sensor or a call to the Qualys API.
+
+      - name: Remove local image
+        if: always()
+        run: docker rmi "$REGISTRY:${{ steps.vars.outputs.image_name }}" || true
+
+  deploy:
+    needs: build
+    if: ${{ inputs.build_deploy_switch == 'CD' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify deploy target is configured
+        run: |
+          if [ -z "${{ needs.build.outputs.private_key_secret }}" ]; then
+            echo "::error::No SSH deploy target configured for environment '${{ inputs.environment }}'"
+            exit 1
+          fi
+
+      - name: Copy deploy script to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ needs.build.outputs.ssh_host }}
+          username: ec2-user
+          key: ${{ secrets[needs.build.outputs.private_key_secret] }}
+          source: "/opt/tmp/Jenkins_Job_Scripts/ppt-reports_image.sh"
+          target: "/var/tmp"
+
+      - name: Run remote deployment
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ needs.build.outputs.ssh_host }}
+          username: ec2-user
+          key: ${{ secrets[needs.build.outputs.private_key_secret] }}
+          script: |
+            sudo chmod 777 /var/tmp/ppt-reports_image.sh
+            sudo /var/tmp/ppt-reports_image.sh ${{ env.REGISTRY }}:${{ needs.build.outputs.image_name }}
+
+  notify:
+    needs: [build, deploy]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post-build notification email
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.SMTP_SERVER }}
+          server_port: 587
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          subject: "[GitHub Actions] ${{ github.workflow }} #${{ github.run_number }} - ${{ needs.build.result }}"
+          to: ${{ secrets.NOTIFY_EMAIL }}
+          from: GitHub Actions
+          body: "Build result: ${{ needs.build.result }}. Deploy result: ${{ needs.deploy.result }}."
